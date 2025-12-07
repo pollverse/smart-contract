@@ -14,6 +14,7 @@ library GovernorError {
     error CreatorCannotVote();
     error ExceedsAllowedLimit();
     error MintFailed();
+    error InvalidMetadataURI();
 }
 
 library TimelockError {
