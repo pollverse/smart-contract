@@ -23,15 +23,11 @@ contract GovernorFactory is Ownable {
         uint32 createdAt;
         bool isHidden;   // Removed from UI, but functional
         bool isDeleted;  // Functionality locked (Killed)
-        string daoName;
-        string daoDescription;
-        string daoLogoURI;
+        string metadataURI; // for daoName, daoDescription, daoLogoLink
     }
 
     struct CreateDAOParams {
-        string daoName;
-        string daoDescription;
-        string daoLogoURI;
+        string metadataURI; // for daoName, daoDescription, daoLogoLink
         string tokenName;
         string tokenSymbol;
         uint256 initialSupply;
@@ -48,7 +44,7 @@ contract GovernorFactory is Ownable {
     DAOConfig[] public daos;
     mapping(address => uint256[]) private daoIdsByCreator;
     
-    event DAOCreated(uint256 indexed daoId, address indexed governor, string name, address creator);
+    event DAOCreated(uint256 indexed daoId, address indexed governor, string metadataURI, address creator);
     event DAOHidden(uint256 indexed daoId, bool status);
     event DAODeleted(uint256 indexed daoId);
 
@@ -90,9 +86,7 @@ contract GovernorFactory is Ownable {
             createdAt: uint32(block.timestamp),
             isHidden: false,
             isDeleted: false,
-            daoName: p.daoName,
-            daoDescription: p.daoDescription,
-            daoLogoURI: p.daoLogoURI
+            metadataURI: p.metadataURI
         }));
 
         daoIdsByCreator[msg.sender].push(daoId);
@@ -100,7 +94,7 @@ contract GovernorFactory is Ownable {
         // 3. Setup Permissions
         _configureRoles(p.tokenType, token, governor, timelock);
 
-        emit DAOCreated(daoId, governor, p.daoName, msg.sender);
+        emit DAOCreated(daoId, governor, p.metadataURI, msg.sender);
     }
 
     /**
