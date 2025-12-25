@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/governance/utils/IVotes.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "../core/DGPGovernor.sol";
 import "../core/DGPTimelockController.sol";
 import "../core/DGPTreasury.sol";
@@ -9,7 +10,7 @@ import "../core/voting/ERC20VotingPower.sol";
 import "../core/voting/ERC721VotingPower.sol";
 import {FactoryError} from "../libraries/Errors.sol";
 
-contract GovernorFactory {
+contract GovernorFactory is Ownable {
     enum TokenType { ERC20, ERC721 }
 
     struct DAOConfig {
@@ -17,11 +18,20 @@ contract GovernorFactory {
         address timelock;
         address treasury;
         address token;
+        address creator;
         uint8 tokenType;
         uint32 createdAt;
+        bool isHidden;   // Removed from UI, but functional
+        bool isDeleted;  // Functionality locked (Killed)
+        string daoName;
+        string daoDescription;
+        string daoLogoURI;
     }
 
     struct CreateDAOParams {
+        string daoName;
+        string daoDescription;
+        string daoLogoURI;
         string tokenName;
         string tokenSymbol;
         uint256 initialSupply;
@@ -31,131 +41,129 @@ contract GovernorFactory {
         uint256 proposalThreshold;
         uint256 timelockDelay;
         uint256 quorumPercentage;
-        uint8 tokenType;
-        string baseURI;
+        uint8 tokenType; // 0 for ERC20, 1 for ERC721
+        string baseURI;  // For NFTs
     }
 
     DAOConfig[] public daos;
     mapping(address => uint256[]) private daoIdsByCreator;
-    mapping(address => bool) private isDAO;
     
-    event DAOCreated(
-        uint256 indexed daoId,
-        address indexed governor,
-        address indexed token,
-        uint8 tokenType,
-        address creator,
-        uint32 timestamp
-    );
+    event DAOCreated(uint256 indexed daoId, address indexed governor, string name, address creator);
+    event DAOHidden(uint256 indexed daoId, bool status);
+    event DAODeleted(uint256 indexed daoId);
 
-    function createDAO(CreateDAOParams calldata p) external returns (address, address, address, address) {
-        address timelock = _deployTimelock(p.timelockDelay);
+    constructor() Ownable(msg.sender) {}
+
+    /**
+     * @dev Creates a full DAO suite and configures roles.
+     */
+    function createDAO(CreateDAOParams calldata p) external returns (uint256 daoId) {
+        daoId = daos.length;
+
+        // 1. Deploy Core Components
+        address timelock = address(new DGPTimelockController(p.timelockDelay, new address[](0), new address[](0), address(this)));
         address token = _deployToken(p.tokenType, p.tokenName, p.tokenSymbol, p.initialSupply, p.maxSupply, p.baseURI);
-        address governor = _deployGovernor(token, timelock, p.votingDelay, p.votingPeriod, p.proposalThreshold, p.quorumPercentage);
-        address treasury = _deployTreasury(timelock);
+        
+        // Pass factory address and daoId to Governor for "isDeleted" checks
+        address governor = address(new DGPGovernor(
+            IVotes(token),
+            DGPTimelockController(payable(timelock)),
+            p.votingDelay,
+            p.votingPeriod,
+            p.proposalThreshold,
+            p.quorumPercentage,
+            msg.sender, // Admin
+            address(this),
+            daoId
+        ));
 
-        uint256 daoId = daos.length;
+        address treasury = address(new DGPTreasury(timelock, governor));
+
+        // 2. Register DAO
         daos.push(DAOConfig({
             governor: governor,
             timelock: timelock,
             treasury: treasury,
             token: token,
+            creator: msg.sender,
             tokenType: p.tokenType,
-            createdAt: uint32(block.timestamp)
+            createdAt: uint32(block.timestamp),
+            isHidden: false,
+            isDeleted: false,
+            daoName: p.daoName,
+            daoDescription: p.daoDescription,
+            daoLogoURI: p.daoLogoURI
         }));
-        
-        daoIdsByCreator[msg.sender].push(daoId);
-        isDAO[governor] = true;
 
+        daoIdsByCreator[msg.sender].push(daoId);
+
+        // 3. Setup Permissions
         _configureRoles(p.tokenType, token, governor, timelock);
 
-        emit DAOCreated(daoId, governor, token, p.tokenType, msg.sender, uint32(block.timestamp));
-        return (governor, timelock, treasury, token);
+        emit DAOCreated(daoId, governor, p.daoName, msg.sender);
     }
 
-    function _deployTimelock(uint256 delay) internal returns (address) {
-        return address(new DGPTimelockController(delay, new address[](0), new address[](0), address(this)));
+    /**
+     * @dev Hiding keeps the DAO alive but signals the frontend to stop displaying it.
+     */
+    function setHidden(uint256 daoId, bool status) external {
+        require(msg.sender == daos[daoId].creator, "Only creator can hide");
+        daos[daoId].isHidden = status;
+        emit DAOHidden(daoId, status);
     }
 
-    function _deployToken(
-        uint8 tokenType,
-        string memory tokenName,
-        string memory tokenSymbol,
-        uint256 initialSupply,
-        uint256 maxSupply,
-        string memory baseURI
-    ) internal returns (address) {
-        if (tokenType == 0) { // ERC20
-            return address(new ERC20VotingPower(tokenName, tokenSymbol, initialSupply, maxSupply, msg.sender));
-        }
-        return address(new ERC721VotingPower(tokenName, tokenSymbol, maxSupply, baseURI));
+    /**
+     * @dev Deleting locks the Governor. It cannot be undone.
+     */
+    function deleteDAO(uint256 daoId) external {
+        require(msg.sender == daos[daoId].creator, "Only creator can delete");
+        require(!daos[daoId].isDeleted, "Already deleted");
+        
+        daos[daoId].isDeleted = true;
+        daos[daoId].isHidden = true; // Auto-hide on delete
+        
+        emit DAODeleted(daoId);
     }
 
-    function _deployGovernor(
-        address token,
-        address timelock,
-        uint256 votingDelay,
-        uint256 votingPeriod,
-        uint256 proposalThreshold,
-        uint256 quorumPercentage
-    ) internal returns (address) {
-        return address(new DGPGovernor(
-            IVotes(token),
-            DGPTimelockController(payable(timelock)),
-            votingDelay,
-            votingPeriod,
-            proposalThreshold,
-            quorumPercentage,
-            msg.sender
-        ));
-    }
+    // --- Internal Helpers ---
 
-    function _deployTreasury(address timelock) internal returns (address) {
-        return address(new DGPTreasury(timelock, timelock));
+    function _deployToken(uint8 tType, string memory n, string memory s, uint256 init, uint256 max, string memory bURI) internal returns (address) {
+        if (tType == 0) return address(new ERC20VotingPower(n, s, init, max, msg.sender));
+        return address(new ERC721VotingPower(n, s, max, bURI));
     }
 
     function _configureRoles(uint8 tokenType, address token, address governor, address timelock) internal {
-        // Configure token roles
-        if (tokenType == 0) { // ERC20
+        DGPTimelockController tc = DGPTimelockController(payable(timelock));
+        
+        // Timelock Roles
+        tc.grantRole(tc.PROPOSER_ROLE(), governor);
+        tc.grantRole(tc.CANCELLER_ROLE(), governor); // Governor can cancel its own queued proposals
+        tc.grantRole(tc.EXECUTOR_ROLE(), address(0)); // Public execution
+        tc.grantRole(tc.DEFAULT_ADMIN_ROLE(), timelock); // Timelock owns itself
+        tc.renounceRole(tc.DEFAULT_ADMIN_ROLE(), address(this));
+
+        // Token Roles
+        if (tokenType == 0) {
             ERC20VotingPower t = ERC20VotingPower(token);
             t.grantRole(t.MINTER_ROLE(), governor);
-            t.grantRole(t.MINTER_ROLE(), timelock);
-            t.revokeRole(t.MINTER_ROLE(), address(this));
             t.grantRole(t.DEFAULT_ADMIN_ROLE(), timelock);
             t.renounceRole(t.DEFAULT_ADMIN_ROLE(), address(this));
-        } else { // ERC721
+            t.renounceRole(t.MINTER_ROLE(), address(this));
+        } else {
             ERC721VotingPower t = ERC721VotingPower(token);
             t.grantRole(t.MINTER_ROLE(), governor);
-            t.grantRole(t.MINTER_ROLE(), timelock);
-            t.revokeRole(t.MINTER_ROLE(), address(this));
             t.grantRole(t.DEFAULT_ADMIN_ROLE(), timelock);
             t.renounceRole(t.DEFAULT_ADMIN_ROLE(), address(this));
+            t.renounceRole(t.MINTER_ROLE(), address(this));
         }
-
-        // Configure timelock roles
-        DGPTimelockController tc = DGPTimelockController(payable(timelock));
-        tc.grantRole(tc.PROPOSER_ROLE(), governor);
-        tc.grantRole(tc.EXECUTOR_ROLE(), address(0));
-        tc.grantRole(tc.DEFAULT_ADMIN_ROLE(), governor);
-        tc.renounceRole(tc.DEFAULT_ADMIN_ROLE(), address(this));
     }
 
-    function getDao(uint256 daoId) external view returns (DAOConfig memory) {
-        if (daoId >= daos.length) revert FactoryError.DAODoesNotExist();
+    // --- Getters ---
+    function getDAO(uint256 daoId) external view returns (DAOConfig memory) {
         return daos[daoId];
-    }
-
-    function getAllDao() external view returns (DAOConfig[] memory) {
-        return daos;
     }
 
     function getDaosByCreator(address creator) external view returns (uint256[] memory) {
         return daoIdsByCreator[creator];
-    }
-
-    function deleteDao(uint256 daoId) external {
-        if (daoId >= daos.length) revert FactoryError.DAODoesNotExist();
-        daos[daoId] = daos[daos.length - 1];
-        daos.pop();
     }
 }

@@ -23,7 +23,7 @@ import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/governance/utils/IVotes.sol";
-
+import {GovernorFactory} from "../factories/GovernorFactory.sol";
 import {GovernorError} from "../libraries/Errors.sol";
 
 contract DGPGovernor is
@@ -36,6 +36,9 @@ contract DGPGovernor is
 {
     using SafeCast for uint256;
     using Address for address;
+
+    address public immutable factory;
+    uint256 public immutable daoId;
 
     /// @notice quorum percentage (1..99)
     uint256 private _quorumPercentage;
@@ -64,7 +67,9 @@ contract DGPGovernor is
         uint256 _votingPeriod,
         uint256 _proposalThreshold,
         uint256 quorumPercentage_,
-        address admin
+        address admin,
+        address _factory,
+        uint256 _daoId
     )
         Governor("DGP Governor")
         GovernorSettings(
@@ -81,11 +86,19 @@ contract DGPGovernor is
         }
         _quorumPercentage = quorumPercentage_;
         _transferOwnership(admin);
+        factory = _factory;
+        daoId = _daoId;
     }
 
     // -----------------------
     // Proposal metadata + creation
     // -----------------------
+
+    modifier onlyActive() {
+        (, , , , , , , , bool isDeleted, , , ) = GovernorFactory(factory).daos(daoId);
+        require(!isDeleted, "Governor: DAO has been deleted");
+        _;
+    }
 
     /**
      * @dev Create a proposal with minimal on-chain metadata.
@@ -98,7 +111,7 @@ contract DGPGovernor is
         uint256[] memory values,
         bytes[] memory calldatas,
         string memory metadataURI
-    ) public returns (uint256 proposalId) {
+    ) public onlyActive returns (uint256 proposalId) {
         if (bytes(metadataURI).length == 0) revert GovernorError.InvalidMetadataURI();
         
         // Create proposal with minimal description (just references backend)
