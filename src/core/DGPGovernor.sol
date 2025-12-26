@@ -94,18 +94,11 @@ contract DGPGovernor is
     // -----------------------
 
     modifier onlyActive() {
-        GovernorFactory.DAOConfig memory config = GovernorFactory(factory).getDAO(daoId);
-        require(!config.isDeleted, "Governor: DAO has been deleted");
+        if (GovernorFactory(factory).isDeleted(daoId)) {
+            revert("Governor: DAO has been deleted");
+        }
         _;
     }
-
-    /**
-     * @dev Create a proposal with minimal on-chain metadata.
-     * Full proposal details stored off-chain (backend/IPFS) via metadataURI.
-     * @param metadataURI Points to JSON object containing: title, description, proposalType, proposedSolution, rationale, expectedOutcomes, timeline, budget
-     *        Example: "ipfs://QmXxxx" or "https://api.backend.com/proposals/{id}"
-     */
-
 
     // -----------------------
     // Proposal metadata + creation

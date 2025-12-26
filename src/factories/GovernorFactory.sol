@@ -160,4 +160,8 @@ contract GovernorFactory is Ownable {
     function getDaosByCreator(address creator) external view returns (uint256[] memory) {
         return daoIdsByCreator[creator];
     }
+
+    function isDeleted(uint256 daoId) external view returns (bool) {
+        return daos[daoId].isDeleted;
+    }
 }
