@@ -26,6 +26,7 @@ import "@openzeppelin/contracts/governance/utils/IVotes.sol";
 import {GovernorRegistry} from "../factories/GovernorRegistry.sol";
 import {GovernorError} from "../libraries/Errors.sol";
 import {ProposalMetadataRegistry} from "./ProposalMetadataRegistry.sol";
+import {VotingPowerMinter} from "./voting/VotingPowerMinter.sol";
 
 contract DGPGovernor is
     Governor,
@@ -43,8 +44,7 @@ contract DGPGovernor is
     uint256 private _quorumPercentage;
 
     ProposalMetadataRegistry public immutable metadataRegistry;
-
-    uint256 public constant MAX_VOTING_POWER = 10_000 * 1e18;
+    VotingPowerMinter public immutable votingPowerMinter;
 
     // -----------------------
     // constructor
@@ -79,6 +79,7 @@ contract DGPGovernor is
         factory = _factory;
         daoId = _daoId;
         metadataRegistry = new ProposalMetadataRegistry(address(this));
+        votingPowerMinter = new VotingPowerMinter(address(this), token());
     }
 
     // -----------------------
@@ -142,36 +143,11 @@ contract DGPGovernor is
     }
 
     // -----------------------
-    // Minting voting power helper
+    // Mint Voting Power
     // -----------------------
 
-    function _mintVotingPower(address to, uint256 amount) internal {
-        (bool ok, ) = address(token()).call(
-            abi.encodeWithSignature("mint(address,uint256)", to, amount)
-        );
-        if (!ok) {
-            for (uint256 i; i < amount; ++i) {
-                (bool okNft, bytes memory retNft) = address(token()).call(
-                    abi.encodeWithSignature("mint(address)", to)
-                );
-                if (!okNft) {
-                    if (retNft.length > 0) {
-                        assembly {
-                            revert(add(retNft, 32), mload(retNft))
-                        }
-                    }
-                    revert GovernorError.MintFailed();
-                }
-            }
-        }
-    }
-
     function mintVotingPower(address to, uint256 amount) external onlyOwner {
-        try IERC20(address(token())).balanceOf(to) returns (uint256 currentBalance) {
-            if (currentBalance + amount >= MAX_VOTING_POWER) revert GovernorError.ExceedsAllowedLimit();
-        } catch {}
-
-        _mintVotingPower(to, amount);
+        votingPowerMinter.mint(to, amount);
     }
 
     // -----------------------

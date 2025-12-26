@@ -5,12 +5,15 @@ import "@openzeppelin/contracts/governance/utils/IVotes.sol";
 import "../core/DGPGovernor.sol";
 import "../core/DGPTimelockController.sol";
 import "../core/DGPTreasury.sol";
-import "../core/voting/ERC20VotingPower.sol";
-import "../core/voting/ERC721VotingPower.sol";
 import "./GovernorRegistry.sol";
+import "./DAOTokenFactory.sol";
+import "./DAORoleConfigurator.sol";
 
 contract DAODeployer {
-    enum TokenType { ERC20, ERC721 }
+    enum TokenType {
+        ERC20,
+        ERC721
+    }
 
     struct CreateDAOParams {
         string metadataURI;
@@ -28,34 +31,94 @@ contract DAODeployer {
     }
 
     GovernorRegistry public immutable registry;
+    DAOTokenFactory public immutable tokenFactory;
+    DAORoleConfigurator public immutable roleConfigurator;
 
-    constructor(address registry_) {
+    constructor(address registry_, address tokenFactory_, address _roleConfigurator) {
         registry = GovernorRegistry(registry_);
+        tokenFactory = DAOTokenFactory(tokenFactory_);
+        roleConfigurator = DAORoleConfigurator(_roleConfigurator);
     }
 
-    function createDAO(CreateDAOParams calldata p) external returns (uint256 daoId) {
-        // 1. Deploy timelock
-        address timelock = address(
-            new DGPTimelockController(
-                p.timelockDelay,
-                new address[](0),
-                new address[](0),
-                address(this)
-            )
+    /* ================== EXTERNAL ================== */
+
+    function createDAO(CreateDAOParams calldata p)
+        external
+        returns (uint256 daoId)
+    {
+        // 1. Reserve DAO ID
+        daoId = registry.reserveDAOId(
+            msg.sender,
+            p.metadataURI,
+            p.tokenType
         );
 
-        // 2. Deploy voting token
-        address token = _deployToken(
+        // 2. Deploy components
+        address timelock = _deployTimelock(p.timelockDelay);
+
+        address token = tokenFactory.deployToken(
             p.tokenType,
             p.tokenName,
             p.tokenSymbol,
             p.initialSupply,
             p.maxSupply,
-            p.baseURI
+            p.baseURI,
+            msg.sender
         );
 
-        // 3. Deploy governor
-        address governor = address(
+        address governor = _deployGovernor(
+            p,
+            token,
+            timelock,
+            daoId
+        );
+
+        address treasury = address(
+            new DGPTreasury(timelock, governor)
+        );
+
+        // 3. Finalize registry
+        registry.finalizeDAO(
+            daoId,
+            governor,
+            timelock,
+            treasury,
+            token
+        );
+
+        // 4. Configure roles
+        roleConfigurator.configure(
+            address(timelock),
+            address(governor),
+            address(treasury),
+            address(token),
+            msg.sender
+        );
+    }
+
+    /* ================== INTERNAL ================== */
+
+    function _deployTimelock(uint256 delay)
+        internal
+        returns (address)
+    {
+        return address(
+            new DGPTimelockController(
+                delay,
+                new address[](0),
+                new address[](0),
+                address(this)
+            )
+        );
+    }
+
+    function _deployGovernor(
+        CreateDAOParams calldata p,
+        address token,
+        address timelock,
+        uint256 daoId
+    ) internal returns (address) {
+        return address(
             new DGPGovernor(
                 IVotes(token),
                 DGPTimelockController(payable(timelock)),
@@ -65,47 +128,9 @@ contract DAODeployer {
                 p.quorumPercentage,
                 address(registry),
                 msg.sender,
-                daoId   
+                daoId
             )
         );
-
-        // 4. Treasury
-        address treasury = address(new DGPTreasury(timelock, governor));
-
-        // 5. Register DAO
-        daoId = registry.registerDAO(
-            GovernorRegistry.DAOConfig({
-                governor: governor,
-                timelock: timelock,
-                treasury: treasury,
-                token: token,
-                creator: msg.sender,
-                tokenType: p.tokenType,
-                createdAt: uint32(block.timestamp),
-                isHidden: false,
-                isDeleted: false,
-                metadataURI: p.metadataURI
-            })
-        );
-
-        // 6. Configure roles
-        _configureRoles(p.tokenType, token, governor, timelock);
-    }
-
-    /* ---------------- Internals ---------------- */
-
-    function _deployToken(
-        uint8 tType,
-        string memory n,
-        string memory s,
-        uint256 init,
-        uint256 max,
-        string memory bURI
-    ) internal returns (address) {
-        if (tType == 0) {
-            return address(new ERC20VotingPower(n, s, init, max, msg.sender));
-        }
-        return address(new ERC721VotingPower(n, s, max, bURI));
     }
 
     function _configureRoles(
@@ -114,7 +139,8 @@ contract DAODeployer {
         address governor,
         address timelock
     ) internal {
-        DGPTimelockController tc = DGPTimelockController(payable(timelock));
+        DGPTimelockController tc =
+            DGPTimelockController(payable(timelock));
 
         tc.grantRole(tc.PROPOSER_ROLE(), governor);
         tc.grantRole(tc.CANCELLER_ROLE(), governor);
@@ -122,18 +148,39 @@ contract DAODeployer {
         tc.grantRole(tc.DEFAULT_ADMIN_ROLE(), timelock);
         tc.renounceRole(tc.DEFAULT_ADMIN_ROLE(), address(this));
 
-        if (tokenType == 0) {
-            ERC20VotingPower t = ERC20VotingPower(token);
-            t.grantRole(t.MINTER_ROLE(), governor);
-            t.grantRole(t.DEFAULT_ADMIN_ROLE(), timelock);
-            t.renounceRole(t.DEFAULT_ADMIN_ROLE(), address(this));
-            t.renounceRole(t.MINTER_ROLE(), address(this));
-        } else {
-            ERC721VotingPower t = ERC721VotingPower(token);
-            t.grantRole(t.MINTER_ROLE(), governor);
-            t.grantRole(t.DEFAULT_ADMIN_ROLE(), timelock);
-            t.renounceRole(t.DEFAULT_ADMIN_ROLE(), address(this));
-            t.renounceRole(t.MINTER_ROLE(), address(this));
-        }
+        // Token roles (generic interface via call)
+        (bool ok, ) = token.call(
+            abi.encodeWithSignature(
+                "grantRole(bytes32,address)",
+                keccak256("MINTER_ROLE"),
+                governor
+            )
+        );
+        require(ok, "MINTER_ROLE grant failed");
+
+        (ok, ) = token.call(
+            abi.encodeWithSignature(
+                "grantRole(bytes32,address)",
+                keccak256("DEFAULT_ADMIN_ROLE"),
+                timelock
+            )
+        );
+        require(ok, "ADMIN_ROLE grant failed");
+
+        token.call(
+            abi.encodeWithSignature(
+                "renounceRole(bytes32,address)",
+                keccak256("DEFAULT_ADMIN_ROLE"),
+                address(this)
+            )
+        );
+
+        token.call(
+            abi.encodeWithSignature(
+                "renounceRole(bytes32,address)",
+                keccak256("MINTER_ROLE"),
+                address(this)
+            )
+        );
     }
 }

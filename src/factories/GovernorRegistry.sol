@@ -22,15 +22,55 @@ contract GovernorRegistry {
     event DAOHidden(uint256 indexed daoId, bool status);
     event DAODeleted(uint256 indexed daoId);
 
-    /* ---------------- DAO lifecycle ---------------- */
+    /* ================= DAO LIFECYCLE ================= */
 
-    function registerDAO(DAOConfig calldata cfg) external returns (uint256 daoId) {
+    /// @notice Step 1 — reserve DAO ID with minimal data
+    function reserveDAOId(
+        address creator,
+        string calldata metadataURI,
+        uint8 tokenType
+    ) external returns (uint256 daoId) {
         daoId = _daos.length;
-        _daos.push(cfg);
-        _daoIdsByCreator[cfg.creator].push(daoId);
 
-        emit DAOCreated(daoId, cfg.governor, cfg.metadataURI, cfg.creator);
+        _daos.push(
+            DAOConfig({
+                governor: address(0),
+                timelock: address(0),
+                treasury: address(0),
+                token: address(0),
+                creator: creator,
+                tokenType: tokenType,
+                createdAt: uint32(block.timestamp),
+                isHidden: false,
+                isDeleted: false,
+                metadataURI: metadataURI
+            })
+        );
+
+        _daoIdsByCreator[creator].push(daoId);
     }
+
+    /// @notice Step 2 — finalize DAO after deployment
+    function finalizeDAO(
+        uint256 daoId,
+        address governor,
+        address timelock,
+        address treasury,
+        address token
+    ) external {
+        DAOConfig storage dao = _daos[daoId];
+
+        require(dao.governor == address(0), "DAO already finalized");
+
+        dao.governor = governor;
+        dao.timelock = timelock;
+        dao.treasury = treasury;
+        dao.token = token;
+
+        emit DAOCreated(daoId, governor, dao.metadataURI, dao.creator);
+    }
+
+    /* ================= DAO CONTROLS ================= */
 
     function setHidden(uint256 daoId, bool status) external {
         require(msg.sender == _daos[daoId].creator, "Only creator");
@@ -48,7 +88,7 @@ contract GovernorRegistry {
         emit DAODeleted(daoId);
     }
 
-    /* ---------------- View helpers ---------------- */
+    /* ================= VIEW HELPERS ================= */
 
     function getDAO(uint256 daoId) external view returns (DAOConfig memory) {
         return _daos[daoId];
