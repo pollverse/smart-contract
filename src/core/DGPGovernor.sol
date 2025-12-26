@@ -23,8 +23,9 @@ import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/governance/utils/IVotes.sol";
-import {GovernorFactory} from "../factories/GovernorFactory.sol";
+import {GovernorRegistry} from "../factories/GovernorRegistry.sol";
 import {GovernorError} from "../libraries/Errors.sol";
+import {ProposalMetadataRegistry} from "./ProposalMetadataRegistry.sol";
 
 contract DGPGovernor is
     Governor,
@@ -39,28 +40,17 @@ contract DGPGovernor is
 
     address public immutable factory;
     uint256 public immutable daoId;
-
-    /// @notice quorum percentage (1..99)
     uint256 private _quorumPercentage;
-    
-    struct ProposalMetadata {
-        address proposer;
-        uint64 timestamp;
-        string metadataURI;
-    }
 
-    /// @notice minimal metadata stored per proposal
-    mapping(uint256 => ProposalMetadata) private _proposalMetadata;
+    ProposalMetadataRegistry public immutable metadataRegistry;
 
     uint256 public constant MAX_VOTING_POWER = 10_000 * 1e18;
-
-    event ProposalCreated(uint256 indexed proposalId, string metadataURI);
-    event MetadataURIUpdated(uint256 indexed proposalId, string newURI);
 
     // -----------------------
     // constructor
     // -----------------------
     constructor(
+        // string memory metadataURI,
         IVotes _token,
         TimelockController _timelock,
         uint256 _votingDelay,
@@ -85,45 +75,42 @@ contract DGPGovernor is
             revert GovernorError.InvalidQuorumPercentage();
         }
         _quorumPercentage = quorumPercentage_;
-        _transferOwnership(admin);
+        // _transferOwnership(admin);
         factory = _factory;
         daoId = _daoId;
+        metadataRegistry = new ProposalMetadataRegistry(address(this));
+    }
+
+    // -----------------------
+    // Modifiers & Overrides
+    // -----------------------
+
+    modifier onlyActive() {
+        if (GovernorRegistry(factory).isDeleted(daoId)) {
+            revert("Governor: DAO has been deleted");
+        }
+        _;
     }
 
     // -----------------------
     // Proposal metadata + creation
     // -----------------------
 
-    modifier onlyActive() {
-        (, , , , , , , , bool isDeleted, , , ) = GovernorFactory(factory).daos(daoId);
-        require(!isDeleted, "Governor: DAO has been deleted");
-        _;
-    }
-
-    /**
-     * @dev Create a proposal with minimal on-chain metadata.
-     * Full proposal details stored off-chain (backend/IPFS) via metadataURI.
-     * @param metadataURI Points to JSON object containing: title, description, proposalType, proposedSolution, rationale, expectedOutcomes, timeline, budget
-     *        Example: "ipfs://QmXxxx" or "https://api.backend.com/proposals/{id}"
-     */
-    function createProposal(
+    function propose(
         address[] memory targets,
         uint256[] memory values,
         bytes[] memory calldatas,
         string memory metadataURI
-    ) public onlyActive returns (uint256 proposalId) {
+    ) public override onlyActive returns (uint256 proposalId) {
         if (bytes(metadataURI).length == 0) revert GovernorError.InvalidMetadataURI();
-        
-        // Create proposal with minimal description (just references backend)
-        proposalId = propose(targets, values, calldatas, metadataURI);
 
-        _proposalMetadata[proposalId] = ProposalMetadata({
-            proposer: msg.sender,
-            timestamp: uint64(block.timestamp),
-            metadataURI: metadataURI
-        });
+        proposalId = super.propose(targets, values, calldatas, metadataURI);
 
-        emit ProposalCreated(proposalId, metadataURI);
+        metadataRegistry.store(
+            proposalId,
+            msg.sender,
+            metadataURI
+        );
     }
 
     /**
@@ -131,24 +118,15 @@ contract DGPGovernor is
      */
     function updateMetadataURI(uint256 proposalId, string memory newURI) external onlyOwner {
         if (bytes(newURI).length == 0) revert GovernorError.InvalidMetadataURI();
-        _proposalMetadata[proposalId].metadataURI = newURI;
-        emit MetadataURIUpdated(proposalId, newURI);
+        metadataRegistry.updateURI(proposalId, newURI);
     }
 
-    function getProposalMetadata(uint256 proposalId) external view returns (ProposalMetadata memory) {
-        return _proposalMetadata[proposalId];
-    }
-
-    function getProposalVotes(uint256 proposalId) external view returns (uint256, uint256, uint256) {
-        return proposalVotes(proposalId);
-    }
-
-    function getMetadataURI(uint256 proposalId) external view returns (string memory) {
-        return _proposalMetadata[proposalId].metadataURI;
-    }
+    // -----------------------
+    // Voting Logic
+    // -----------------------
 
     function castVote(uint256 proposalId, uint8 support) public override returns (uint256) {
-        address proposer = _proposalMetadata[proposalId].proposer;
+        address proposer = metadataRegistry.getProposer(proposalId);
         if (proposer != address(0) && msg.sender == proposer) {
             revert GovernorError.CreatorCannotVote();
         }
@@ -156,7 +134,7 @@ contract DGPGovernor is
     }
 
     function castVoteWithReason(uint256 proposalId, uint8 support, string calldata reason) public override returns (uint256) {
-        address proposer = _proposalMetadata[proposalId].proposer;
+        address proposer = metadataRegistry.getProposer(proposalId);
         if (proposer != address(0) && msg.sender == proposer) {
             revert GovernorError.CreatorCannotVote();
         }
@@ -268,4 +246,13 @@ contract DGPGovernor is
     function _executor() internal view override(Governor, GovernorTimelockControl) returns (address) {
         return super._executor();
     }
+
+    // -----------------------
+    // Getters
+    // -----------------------
+
+    function getProposalVotes(uint256 proposalId) external view returns (uint256, uint256, uint256) {
+        return proposalVotes(proposalId);
+    }
+
 }
